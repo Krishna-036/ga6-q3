@@ -22,7 +22,7 @@ app.post('/', (req, res) => {
             let unescaped = cmd.replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
             unescaped = unescaped.replace(/\\([0-7]{1,3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)));
             
-            // 2. Strip quotes, backslashes, and spaces to defeat string concatenation (e.g., .net"rc")
+            // 2. Strip quotes, backslashes, and spaces
             let stripped = unescaped.replace(/['"\\]/g, '');
             let noSpace = stripped.replace(/\s+/g, '');
             
@@ -32,7 +32,6 @@ app.post('/', (req, res) => {
             }
             
             // 3. De-obfuscate embedded Base64 or Hex strings 
-            // We aggressively parse every word block looking for valid encoding
             const words = unescaped.split(/[\s|&;()<>]+/);
             for (let word of words) {
                 let cleanWord = word.replace(/['"\\]/g, '');
@@ -69,7 +68,6 @@ app.post('/', (req, res) => {
                 } catch(e) { /* ignore */ }
             }
 
-            // If no checks tripped, it is a permitted read (e.g. ls -la)
             return res.json({ decision: 'allow', reason: 'Command permitted.' });
         } 
         
@@ -77,15 +75,27 @@ app.post('/', (req, res) => {
         // RULE 2: File Writes (Strict Boundary)
         // ==========================================
         else if (payload.tool === 'write_file') {
-            const targetPath = payload.path || '';
+            let targetPath = payload.path || '';
             
-            // Resolve the path against the agent's working directory. 
-            // This safely normalizes all `../` traversals into an absolute path.
-            const resolved = path.resolve('/home/agent/workspace', targetPath);
+            // 1. Decode URL encodings to catch %2e%2e%2f (../) bypasses
+            try { 
+                targetPath = decodeURIComponent(targetPath); 
+            } catch (e) { /* ignore malformed URI components */ }
             
-            // Ensure the normalized path strictly resides inside the allowed directory.
-            // Using the trailing slash protects against sibling directory tricks (e.g. /workspace/output_evil/)
-            if (resolved.startsWith('/workspace/output/') || resolved.startsWith('/home/agent/workspace/output/')) {
+            // 2. Normalize Windows backslashes to forward slashes to catch ..\..\ bypasses
+            targetPath = targetPath.replace(/\\/g, '/');
+            
+            // 3. Null byte injection check
+            if (targetPath.includes('\0')) {
+                return res.json({ decision: 'block', reason: 'Null byte injection detected.' });
+            }
+            
+            // 4. Resolve the path absolutely against the working directory.
+            const resolved = path.posix.resolve('/home/agent/workspace', targetPath);
+            
+            // 5. Strict boundary check. 
+            // We now strictly ensure it is inside /workspace/output/ ONLY.
+            if (resolved.startsWith('/workspace/output/')) {
                 return res.json({ decision: 'allow', reason: 'Valid write boundary.' });
             } else {
                 return res.json({ decision: 'block', reason: 'Writes are restricted to /workspace/output/.' });
@@ -98,15 +108,12 @@ app.post('/', (req, res) => {
         else if (payload.tool === 'http_request') {
             let targetUrl = payload.url || '';
             
-            // Force a protocol so Node's URL parser can accurately extract the hostname
             if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
                 targetUrl = 'https://' + targetUrl; 
             }
             
             try {
                 const parsedUrl = new URL(targetUrl);
-                
-                // Compare exact hostnames to prevent domain confusion / prefix attacks
                 if (parsedUrl.hostname === 'huggingface.co' || parsedUrl.hostname === 'api.github.com') {
                     return res.json({ decision: 'allow', reason: 'Host is approved.' });
                 } else {
