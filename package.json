@@ -1,0 +1,12 @@
+{
+  "name": "agent-guardrail",
+  "version": "1.0.0",
+  "description": "Pre-tool-call security evaluator",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
